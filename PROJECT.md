@@ -37,9 +37,9 @@ Die konkrete Auswahl erfolgt in M1/M2 und muss begründet werden.
 |---|---|---|---|
 | Raumtemperatur, relative Luftfeuchte | Sensirion SHT31, digital über I²C (3,3 V) | Grundlage für Überheizungs-Erkennung, Temperatursturz-Erkennung und Verlustberechnung | Hohe Genauigkeit (typ. ±0,3 K / ±2 % rF), werkseitig kalibriert, einfache I²C-Anbindung, gut unterstützt in ESPHome und Arduino |
 | Heizkörper-Oberflächentemperatur | DS18B20 (wasserdicht), 1-Wire, mit Kabelbinder oder Klettband ohne Klebeseite am Vorlaufrohr angelegt | Ableitung „Heizung aktiv“ aus der Temperaturdifferenz Heizkörper – Raum | Berührungssicher, keine Veränderung der Heizungsanlage, kein Bohren oder Kleben, wasserdicht, digital und störunempfindlich |
-| Fensterzustand (offen/zu) | Funk-Fensterkontakt 433 MHz (Reed-Prinzip, batteriebetrieben, Codierung EV1527, sendet „offen“ und „zu“) + Empfänger RXB6 am ESP32 | Direkte Erkennung, ob das Fenster geöffnet ist | Keine Verkabelung am Fenster nötig, Befestigung mit Klemmhalter ohne Bohren und Kleben, günstig, einfache Auswertung |
-| Fensterzustand (Plausibilisierung) | Softwaresensor: Temperaturgradient aus dem SHT31 | Zweite, unabhängige Erkennung eines Öffnungsvorgangs | Redundanz bei leerer Batterie, Funkstörung oder verrutschtem Kontakt, keine zusätzliche Hardware |
-| Außentemperatur | Keine eigene Hardware, Wert kommt über MQTT aus Home Assistant (Wetterintegration) | Temperaturdifferenz innen/außen für die Verlustberechnung | Kein Außensensor montierbar, da keine Eingriffe am Gebäude erlaubt sind |
+| Fensterzustand (zu / gekippt / offen) | Shelly BLU Door/Window ZB: Reed-Kontakt und Lagesensor (Neigungswinkel), batteriebetrieben (CR2032), sendet per Bluetooth LE im BTHome-Format mit AES-Verschlüsselung direkt an den ESP32 | Erkennung, ob das Fenster geschlossen, gekippt oder ganz geöffnet ist | Kein Kabel am Fenster nötig, das ESP32 empfängt Bluetooth ohne Zusatzmodul, Unterscheidung „gekippt“ über den Neigungswinkel (Dauerkippen ist der größte Energieverlust), verschlüsselte Übertragung, Batterielaufzeit laut Hersteller bis zu 5 Jahre, Befestigung mit Klemmhalter ohne Bohren und Kleben |
+
+Zusätzlich wird ein Öffnungsvorgang in Software über den Temperaturabfall des SHT31 plausibilisiert (siehe Abschnitt 8). Die Außentemperatur für die Verlustberechnung stammt nicht von eigener Hardware, sondern aus der Wetterintegration von Home Assistant.
 
 ## 6. Aktoren
 
@@ -53,24 +53,25 @@ Es werden **keine Aktoren verwendet, die in die Heizung oder das Gebäude eingre
 
 ## 7. Gewählter Softwarestack
 
-- **ESPHome-Prototyp:** ESPHome (aktuelle stabile Version, bei Projektstart festgelegt) mit den Komponenten `sht3xd`, `dallas_temp`, `remote_receiver` (rc_switch), `mqtt` mit eigener Topic-Struktur nach `docs/mqtt.md`, Template-Sensoren und einem Intervall-Lambda für die Auswertelogik. Ziel ist die schnelle Überprüfung von Hardware, Funkcodes, Schwellwerten und Datenfluss.
+- **ESPHome-Prototyp:** ESPHome (aktuelle stabile Version, bei Projektstart festgelegt) mit den Komponenten `sht3xd`, `dallas_temp`, `esp32_ble_tracker` mit BTHome-v2-Decoder (External Component, inkl. Entschlüsselung mit dem Geräteschlüssel), `mqtt` mit eigener Topic-Struktur nach `docs/mqtt.md`, Template-Sensoren und einem Intervall-Lambda für die Auswertelogik. Ziel ist die schnelle Überprüfung von Hardware, Bluetooth-Empfang, Schwellwerten und Datenfluss.
 - **Verpflichtende Arduino-/FreeRTOS-Lösung:** Arduino-Framework auf dem ESP32 (Arduino-ESP32-Core 3.x), entwickelt mit PlatformIO. Aufteilung in FreeRTOS-Tasks:
   - `taskSensors`: alle 30 s SHT31 und DS18B20 lesen, Plausibilitätsprüfung
-  - `taskRadio`: 433-MHz-Empfang, Fensterzustand setzen
+  - `taskBle`: Bluetooth-LE-Scan, Filterung auf die MAC-Adresse des eigenen Fensterkontakts, Entschlüsselung (AES-CCM) und Auswertung der BTHome-Daten, Fensterzustand setzen
   - `taskLogic`: Filterung, Zustandsbildung, Verlustberechnung, Status-LED
   - `taskMqtt`: Verbindung mit Last Will, Wiederverbindung ohne Blockieren, Publish, Subscribe, Discovery
   - Datenaustausch über FreeRTOS-Queues, gemeinsamer Zustand mit Mutex geschützt
 - **Bibliotheken und Versionen:** (bei Projektstart festlegen und in `platformio.ini` fixieren)
   - Adafruit SHT31 Library 2.x
   - OneWire 2.3.x, DallasTemperature 3.9.x oder neuer
-  - rc-switch 2.6.x
+  - NimBLE-Arduino 2.x (Bluetooth LE)
+  - mbedTLS aus dem ESP32-Core (AES-CCM-Entschlüsselung)
   - PubSubClient 2.8
   - ArduinoJson 7.x
 - **Home Assistant / Grafana:** MQTT-Broker und Home Assistant auf dem zentralen Raspberry Pi, Einbindung über MQTT Discovery, Automationen für Außentemperatur, Benachrichtigung und TTS-Anfrage, Speicherung der Verläufe, Grafana-Dashboard mit Temperaturverlauf inklusive markierter Fenster-offen-Phasen, Zustandszeitleiste und vermeidbarem Wärmeverlust pro Tag.
 
 **Übergang ESPHome → Arduino/FreeRTOS:**
 
-1. Mit ESPHome werden Verdrahtung, Messwerte, Funkcodes und Schwellwerte validiert.
+1. Mit ESPHome werden Verdrahtung, Messwerte, Bluetooth-Empfang und Schwellwerte validiert.
 2. Die Auswertelogik aus dem ESPHome-Lambda wird als eigene C++-Klassen übernommen und mit denselben Testdaten verglichen.
 3. Sensorabfrage und MQTT-Kommunikation werden schrittweise in eigene FreeRTOS-Tasks überführt.
 4. `group_id`, `device_id`, `object_id`s, Topics, Payloads und Geräte-Metadaten bleiben gemäß `docs/mqtt.md` identisch, damit Home Assistant und Grafana ohne Änderung weiterlaufen.
@@ -86,7 +87,8 @@ Die gesamte Bewertung erfolgt direkt auf dem ESP32. Home Assistant empfängt fer
 | Raum- und Heizkörpertemperatur | Gleitender Mittelwert über 5 Messungen | geglättete Temperaturen | Unterdrückt Messrauschen und kurzzeitige Ausreißer |
 | Differenz Heizkörper – Raum | Schwellwert mit Hysterese (ein über 10 K, aus unter 6 K) | `heating-active` (true/false) | Heizungsstatus ohne Eingriff in die Anlage, Hysterese verhindert Flattern |
 | Raumtemperatur | Gradient über 2 min (Abfall über 0,5 K) | `temperature-drop` (true/false) | Zweite, unabhängige Fenstererkennung |
-| Funkcode Fensterkontakt | Codezuordnung, Entprellung | `window-open` (true/false) | Direkte, eindeutige Fenstererkennung |
+| BTHome-Daten Fensterkontakt (Kontakt, Neigungswinkel) | Entschlüsselung, Kombination: Kontakt zu → `closed`, Kontakt offen und Winkel unter 20° → `tilted`, sonst `open` | `window-state` (`closed`, `tilted`, `open`) | Unterscheidung zwischen kurzem Öffnen und energetisch ungünstigem Dauerkippen |
+| Zeitpunkt der letzten Bluetooth-Nachricht, Batteriestand | Timeout-Überwachung | `quality: stale` beim Fensterzustand | Fehlende Nachrichten (Batterie, Reichweite) werden sichtbar statt falsch als „zu“ gewertet |
 | Fenster, Heizung, Zeit | Zeitzähler mit Verzögerung 5 min | `heating-window-warning` (true/false) | Kurzes Stoßlüften ist erwünscht und soll keine Warnung auslösen |
 | Raum- und Außentemperatur, Fenster, Heizung | Integration: Q = V · 0,34 Wh/(m³·K) · ΔT · n · Δt, Tagesreset um Mitternacht | `avoidable-heat-loss` (kWh) | Macht die Energieverschwendung als vergleichbare Kennzahl sichtbar |
 | alle obigen Zustände | Zustandsautomat mit Priorität | `operating-state`: `heating-off`, `heating`, `ventilating`, `overheating`, `heating-window-open` | Ein verständlicher Gesamtzustand für LED, Home Assistant und Grafana |
@@ -99,7 +101,7 @@ Beispiel: Sensor → ESP32 → Prüfung → lokale Verarbeitung → Zustandsbild
 
 **Unser Datenfluss:**
 
-SHT31, DS18B20 und 433-MHz-Fensterkontakt → ESP32 → Plausibilitätsprüfung → Filterung (gleitender Mittelwert, Hysterese, Gradient) → Zustandsbildung und Verlustberechnung → Status-LED und MQTT → Home Assistant (Anzeige, Automationen, Benachrichtigung, TTS-Anfrage) → Datenspeicherung → Grafana-Dashboard
+SHT31 und DS18B20 (kabelgebunden) sowie Shelly BLU Door/Window ZB (Bluetooth LE) → ESP32 → Plausibilitätsprüfung → Filterung (gleitender Mittelwert, Hysterese, Gradient) → Zustandsbildung und Verlustberechnung → Status-LED und MQTT → Home Assistant (Anzeige, Automationen, Benachrichtigung, TTS-Anfrage) → Datenspeicherung → Grafana-Dashboard
 
 Rückkanal: Home Assistant (Wetterintegration) → MQTT `command/outdoor-temperature` → ESP32
 
@@ -119,7 +121,8 @@ Alle Topics, Payloads, Availability und Discovery folgen dem verbindlichen [MQTT
 | `room-temperature` | Zahl | °C | −10 bis 50, sonst `invalid` | alle 30 s |
 | `room-humidity` | Zahl | % | 0 bis 100, sonst `invalid` | alle 30 s |
 | `radiator-temperature` | Zahl | °C | −10 bis 90, sonst `invalid` | alle 30 s |
-| `window-open` | Boolean | `""` | `stale`, wenn der Kontakt länger als 24 h nichts gesendet hat | bei Änderung |
+| `window-state` | String | `""` | `closed`, `tilted`, `open`; `stale`, wenn der Kontakt länger als 24 h nichts gesendet hat | bei Änderung |
+| `window-battery` | Zahl | % | 0 bis 100 | bei Empfang, höchstens alle 60 min |
 | `temperature-drop` | Boolean | `""` | true/false | bei Änderung |
 | `heating-active` | Boolean | `""` | true/false | bei Änderung |
 | `operating-state` | String | `""` | `heating-off`, `heating`, `ventilating`, `overheating`, `heating-window-open` | bei Änderung |
@@ -181,21 +184,22 @@ Temperaturen werden alle 30 s gesendet, weil sich die Raumtemperatur langsam än
 
 **Schulhardware und Infrastruktur:** Die Heizung und das Gebäude werden nicht verändert. Der Heizkörperfühler wird nur mit Kabelbinder oder Klettband ohne Klebeseite außen angelegt, der Fensterkontakt mit Klemmhaltern befestigt. Alle Befestigungen sind rückstandsfrei entfernbar und werden vorab mit der Lehrperson abgestimmt. Kabel werden ohne Stolpergefahr verlegt.
 
-**Funk (433 MHz):** Das Protokoll ist unverschlüsselt und könnte gestört oder nachgeahmt werden. Das Risiko ist gering, da nur Hinweise entstehen und nichts gesteuert wird. Der Fensterzustand wird zusätzlich über den Temperaturgradienten plausibilisiert.
+**Bluetooth:** Der ESP32 wertet ausschließlich die Nachrichten des eigenen Fensterkontakts aus, gefiltert über dessen MAC-Adresse. Andere Bluetooth-Geräte im Raum (z. B. Handys) werden weder ausgewertet, gespeichert noch übertragen, es findet keine Präsenzerkennung wie bei ESPresense statt. Die BTHome-Nachrichten sind mit AES verschlüsselt, der Schlüssel liegt nur in den Secrets und nicht im Repository. Da nur Hinweise entstehen und nichts gesteuert wird, ist das Risiko einer Störung gering. Der Fensterzustand wird zusätzlich über den Temperaturgradienten plausibilisiert.
 
-**Audio, Bluetooth/ESPresense:** Werden nicht verwendet. Es erfolgt keine Erfassung von Sprache, Geräten oder Personen.
+**Audio:** Wird nicht verwendet. Es erfolgt keine Erfassung von Sprache.
 
 **TTS:** Anfragen nur über die freigegebene Schnittstelle, mit sachlichem Text ohne Personenbezug, `priority: low`, `volume` höchstens 0.3 und höchstens einer Anfrage pro 30 min, damit der Unterricht nicht gestört wird.
 
 **Personenbezogene Daten:** Es werden keine personenbezogenen Daten erhoben. Aus Fenster- und Heizungszustand könnte indirekt auf die Raumnutzung geschlossen werden. Die Daten werden deshalb nur mit der Gerätekennung gespeichert und nicht mit Stundenplänen oder Namen verknüpft.
 
-**Zugangsdaten:** WLAN-, MQTT- und OTA-Zugangsdaten liegen in `secrets.yaml` bzw. `secrets.h`, die über `.gitignore` nicht ins Repository gelangen. Keine Payload enthält Geheimnisse. OTA-Updates sind passwortgeschützt.
+**Zugangsdaten:** WLAN-, MQTT- und OTA-Zugangsdaten sowie der Bluetooth-Schlüssel des Fensterkontakts liegen in `secrets.yaml` bzw. `secrets.h`, die über `.gitignore` nicht ins Repository gelangen. Keine Payload enthält Geheimnisse. OTA-Updates sind passwortgeschützt.
 
 **Verbleibende Risiken:**
 
 - Fehlwarnungen bei ungünstiger Sensorplatzierung (z. B. Sonne auf dem Gehäuse, Gerät direkt über dem Heizkörper)
 - Die Verlust-Kennzahl ist eine Abschätzung mit angenommenem Luftwechsel
-- Batterieausfall des Fensterkontakts, abgefangen durch Plausibilisierung und `quality: stale`
+- Batterieausfall oder zu große Entfernung des Fensterkontakts (Reichweite laut Hersteller etwa 10 m in Innenräumen), abgefangen durch Plausibilisierung, Batterieanzeige und `quality: stale`
+- WLAN und Bluetooth teilen sich auf dem ESP32 eine Antenne, gelegentlich können Bluetooth-Nachrichten verloren gehen
 - Unverschlüsselte MQTT-Verbindung, falls der zentrale Broker kein TLS anbietet
 
 ## 13. Abnahmekriterien
@@ -203,7 +207,7 @@ Temperaturen werden alle 30 s gesendet, weil sich die Raumtemperatur langsam än
 Die IDs werden in [docs/requirements.md](docs/requirements.md) mit den zugehörigen Tests aus [docs/testing.md](docs/testing.md) eingetragen.
 
 - [ ] **REQ-F-01:** Raum- und Heizkörpertemperatur werden mindestens alle 30 s mit gültigem `quality`-Feld veröffentlicht. Die Raumtemperatur weicht höchstens ±0,5 K von einem Referenzthermometer ab.
-- [ ] **REQ-F-02:** Eine Fensteröffnung wird in 10 von 10 Versuchen innerhalb von 5 s erkannt und als `window-open` veröffentlicht.
+- [ ] **REQ-F-02:** Öffnen, Kippen und Schließen werden in jeweils 10 von 10 Versuchen innerhalb von 5 s erkannt und als `window-state` veröffentlicht.
 - [ ] **REQ-F-03:** Der Heizungszustand wird bei auf- und zugedrehtem Heizkörper korrekt als `heating-active` erkannt, ohne mehrfaches Umschalten im Übergangsbereich.
 - [ ] **REQ-F-04:** Nach 5 min (±30 s) Heizen bei offenem Fenster wird `heating-window-warning` aktiv. Bei Stoßlüften unter 5 min entsteht keine Warnung.
 - [ ] **REQ-F-05:** `avoidable-heat-loss` stimmt mit einer Handrechnung aus den gespeicherten Daten auf ±5 % überein und wird um Mitternacht zurückgesetzt.
